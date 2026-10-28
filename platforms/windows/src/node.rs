@@ -798,6 +798,7 @@ fn enqueue_property_change(
     ISelectionItemProvider,
     ISelectionProvider,
     ITextProvider,
+    ITextProvider2,
     IExpandCollapseProvider,
     IWindowProvider
 )]
@@ -1325,6 +1326,7 @@ properties! {
     (UIA_PositionInSetPropertyId, position_in_set),
     (UIA_SizeOfSetPropertyId, size_of_set),
     (UIA_AriaPropertiesPropertyId, aria_properties),
+    (UIA_IsTextPattern2AvailablePropertyId, is_text_pattern_supported),
     (UIA_IsDialogPropertyId, is_dialog)
 }
 
@@ -1425,6 +1427,25 @@ patterns! {
                     .filter_map(|item| item.cast::<IUnknown>().ok())
                     .collect();
                 Ok(safe_array_from_com_slice(&selection))
+            })
+        }
+    )),
+    (UIA_TextPattern2Id, ITextProvider2, ITextProvider2_Impl, is_text_pattern_supported, (), (
+        fn RangeFromAnnotation(&self, _annotation: Ref<IRawElementProviderSimple>) -> Result<ITextRangeProvider> {
+            Err(not_supported())
+        },
+
+        fn GetCaretRange(&self, is_active: *mut BOOL) -> Result<ITextRangeProvider> {
+            if is_active.is_null() {
+                return Err(E_POINTER.into());
+            }
+            unsafe { *is_active = false.into(); }
+            self.resolve_for_text_pattern(|node| {
+                let position = node.text_selection_focus().ok_or_else(not_supported)?;
+                let range = position.to_degenerate_range();
+                let platform_range = PlatformTextRange::new(&self.context, range).into();
+                unsafe { *is_active = node.is_focused().into(); }
+                Ok(platform_range)
             })
         }
     )),
