@@ -1,0 +1,72 @@
+name: Verify Zed caret candidate on MSVC
+on:
+  push:
+    branches: [codex/zed-msvc-ci]
+permissions:
+  contents: read
+jobs:
+  zed:
+    if: github.repository == 'POLARIS0824/accesskit'
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      RUST_BACKTRACE: '1'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          repository: POLARIS0824/zed
+          ref: 592bf3b03c7f603963f48675933cddac385f3e0f
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install repository-pinned MSVC toolchain
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          rustup run 1.98.1 rustc -vV
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git rev-parse HEAD
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-Content rust-toolchain.toml
+      - name: Compile editor and GPUI behavior tests together
+        run: |
+          cargo +1.98.1 test -j2 --locked -p editor -p gpui --lib --no-run --message-format=json > build-messages.json
+          $code = $LASTEXITCODE
+          if ($code) {
+            Get-Content build-messages.json | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-message' } | ForEach-Object { $_.message.rendered }
+            exit $code
+          }
+      - name: Execute focused behavior checks
+        run: |
+          $messages = Get-Content build-messages.json | ForEach-Object { $_ | ConvertFrom-Json }
+          $tests = $messages | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.executable }
+          foreach ($case in @(
+            @{ target = 'editor'; label = 'layout'; filter = 'element::tests::test_accessibility_'; count = 4 },
+            @{ target = 'editor'; label = 'model'; filter = 'element::accessibility::tests::'; count = 4 },
+            @{ target = 'gpui'; label = 'focus'; filter = 'custom_element_focus'; count = 3 }
+          )) {
+            $binaries = @($tests | Where-Object { $_.target.name -eq $case.target })
+            if ($binaries.Count -ne 1) { throw "Expected one $($case.target) executable" }
+            $result = & $binaries[0].executable $case.filter --test-threads=1 2>&1
+            $code = $LASTEXITCODE
+            $result | Tee-Object -FilePath "$($case.target)-$($case.label)-tests.log"
+            if ($code) { exit $code }
+            if (($result -join "`n") -notmatch "test result: ok\. $($case.count) passed; 0 failed;") { throw 'Unexpected test count' }
+          }
+      - name: Build current Zed and paired CLI
+        run: |
+          cargo +1.98.1 build -j2 --locked -p zed -p cli --bin zed --bin cli
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-FileHash target/debug/zed.exe,target/debug/cli.exe -Algorithm SHA256 | Format-List
+          git status --short
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git diff --exit-code
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
